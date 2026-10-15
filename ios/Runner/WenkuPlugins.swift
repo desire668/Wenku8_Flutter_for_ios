@@ -450,7 +450,7 @@ final class LocalToolsPlugin: NSObject, FlutterPlugin {
   }
 
   private func presentPicker(exporting urls: [URL], completion: @escaping (Bool?) -> Void) {
-    DispatchQueue.main.async {
+    DispatchQueue.main.async { [self] in
       guard #available(iOS 14.0, *) else {
         pickerActive = false
         completion(nil)
@@ -474,7 +474,7 @@ final class LocalToolsPlugin: NSObject, FlutterPlugin {
   }
 
   private func presentPicker(opening types: [UTType], completion: @escaping (URL?) -> Void) {
-    DispatchQueue.main.async {
+    DispatchQueue.main.async { [self] in
       guard #available(iOS 14.0, *) else {
         pickerActive = false
         completion(nil)
