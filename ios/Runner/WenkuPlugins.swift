@@ -55,8 +55,10 @@ final class Wenku8BridgePlugin: NSObject, FlutterPlugin {
   private static let redirectDelegate = NoRedirectDelegate()
   private static let session: URLSession = {
     let config = URLSessionConfiguration.default
-    config.timeoutIntervalForRequest = 15
-    config.timeoutIntervalForResource = 30
+    // The relay (a Cloudflare Worker proxying wenku8) routinely takes 6–30s
+    // per request, so be generous or every cloud-favourites call times out.
+    config.timeoutIntervalForRequest = 60
+    config.timeoutIntervalForResource = 120
     config.httpShouldSetCookies = false
     return URLSession(configuration: config, delegate: Wenku8BridgePlugin.redirectDelegate, delegateQueue: nil)
   }()
@@ -211,7 +213,7 @@ final class Wenku8BridgePlugin: NSObject, FlutterPlugin {
     if let cookie {
       request.setValue("PHPSESSID=\(cookie)", forHTTPHeaderField: "Cookie")
     }
-    request.timeoutInterval = 15
+    request.timeoutInterval = 60
     request.httpShouldHandleCookies = false
     request.httpBody = Data(body.utf8)
 
@@ -226,7 +228,7 @@ final class Wenku8BridgePlugin: NSObject, FlutterPlugin {
       semaphore.signal()
     }
     task.resume()
-    if semaphore.wait(timeout: .now() + 30) == .timedOut {
+    if semaphore.wait(timeout: .now() + 125) == .timedOut {
       task.cancel()
       throw WenkuFailure.network("请求超时，请检查网络后重试")
     }
@@ -293,7 +295,7 @@ final class Wenku8BridgePlugin: NSObject, FlutterPlugin {
     try? manager.removeItem(at: file)
 
     var request = URLRequest(url: url)
-    request.timeoutInterval = 12
+    request.timeoutInterval = 30
     request.httpShouldHandleCookies = false
     let semaphore = DispatchSemaphore(value: 0)
     var payload: Data?
@@ -306,7 +308,7 @@ final class Wenku8BridgePlugin: NSObject, FlutterPlugin {
       semaphore.signal()
     }
     task.resume()
-    if semaphore.wait(timeout: .now() + 20) == .timedOut {
+    if semaphore.wait(timeout: .now() + 60) == .timedOut {
       task.cancel()
       throw WenkuFailure.network("插图请求超时")
     }

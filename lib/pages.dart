@@ -2738,6 +2738,8 @@ class _ReaderPageState extends State<ReaderPage>
   // Stable chapter IDs/paragraph anchors own restoration; do not also walk
   // PageStorage and persist the viewport on every interrupted fling.
   final _scroll = ScrollController(keepScrollOffset: false);
+  // Left/right swipe paging on a vertical-scroll article.
+  double _swipeDx = 0;
   late final _followScroll = ReaderFollowScroll(_scroll);
   final _paragraphRegistry = ReaderParagraphRegistry();
   ReadingPosition? _restorePending;
@@ -3227,6 +3229,45 @@ class _ReaderPageState extends State<ReaderPage>
         curve: NovelMotion.ease,
       );
     }
+  }
+
+  /// Translate a horizontal swipe into a viewport page turn, and at chapter
+  /// boundaries into the previous/next chapter so the article keeps flowing.
+  void _onHorizontalDragStart(DragStartDetails _) => _swipeDx = 0;
+
+  void _onHorizontalDragUpdate(DragUpdateDetails details) {
+    _swipeDx += details.primaryDelta ?? 0;
+  }
+
+  void _onHorizontalDragEnd(DragEndDetails details) {
+    final velocity = details.primaryVelocity ?? 0;
+    int direction;
+    if (velocity.abs() >= 40) {
+      direction = velocity < 0 ? 1 : -1;
+    } else if (_swipeDx.abs() >= 40) {
+      direction = _swipeDx < 0 ? 1 : -1;
+    } else {
+      return;
+    }
+    if (!_ready ||
+        _toolsOpen ||
+        _catalogueOpen ||
+        _listeningOpen ||
+        _findOpen ||
+        !_scroll.hasClients) {
+      return;
+    }
+    final position = _scroll.position;
+    if (direction > 0 &&
+        (position.maxScrollExtent - position.pixels).abs() <= 1.0) {
+      if (_chapter + 1 < widget.novel.chapters.length) _go(_chapter + 1);
+      return;
+    }
+    if (direction < 0 && position.pixels.abs() <= 1.0) {
+      if (_chapter > 0) _go(_chapter - 1);
+      return;
+    }
+    _pageBy(direction);
   }
 
   Future<String> _requestContent(int index, {bool refresh = false}) async {
@@ -3733,6 +3774,9 @@ class _ReaderPageState extends State<ReaderPage>
                             key: const ValueKey('reader-content-tap'),
                             behavior: HitTestBehavior.translucent,
                             onTap: _toggleChrome,
+                            onHorizontalDragStart: _onHorizontalDragStart,
+                            onHorizontalDragUpdate: _onHorizontalDragUpdate,
+                            onHorizontalDragEnd: _onHorizontalDragEnd,
                             child: _article(context, chapter, dark),
                           ),
                         ),
