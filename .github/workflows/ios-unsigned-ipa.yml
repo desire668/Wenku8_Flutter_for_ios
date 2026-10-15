@@ -1,0 +1,160 @@
+name: iOS Unsigned IPA
+
+# Builds a Release iOS app bundle with code signing disabled and packs it as an
+# unsigned .ipa. Install it on your own device with a self-signing tool
+# (Sideloadly / AltStore / e-sign / TrollStore ...). See the notes file that is
+# shipped next to the artifact for details.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bundle_id:
+        description: 'Bundle identifier baked into the IPA'
+        required: false
+        default: 'org.mewx.wenku8Flutter'
+      deployment_target:
+        description: 'Minimum iOS version'
+        required: false
+        default: '13.0'
+      publish_release:
+        description: 'Attach the IPA to a GitHub release'
+        type: boolean
+        default: true
+  push:
+    tags: ['ios-v*']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ios-unsigned-ipa-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.41.5'
+          channel: stable
+          cache: true
+
+      - name: Read app version
+        id: version
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, re
+          text = pathlib.Path('pubspec.yaml').read_text()
+          match = re.search(r'^version:\s*(\S+)\s*$', text, re.M)
+          name, _, build = match.group(1).partition('+')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write(f"name={name}\nbuild={build or '1'}\nfull={match.group(1)}\n")
+          PY
+
+      - run: python3 tools/check_public_source.py
+
+      - run: flutter --version
+
+      - run: flutter pub get
+
+      - name: Turn off Xcode signing and apply bundle id
+        env:
+          BUNDLE_ID: ${{ inputs.bundle_id || 'org.mewx.wenku8Flutter' }}
+          DEPLOYMENT_TARGET: ${{ inputs.deployment_target || '13.0' }}
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, re
+          pbx_path = pathlib.Path('ios/Runner.xcodeproj/project.pbxproj')
+          text = pbx_path.read_text()
+          text = text.replace('CODE_SIGN_STYLE = Automatic;', 'CODE_SIGN_STYLE = Manual;')
+          text = text.replace(
+              '"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "iPhone Developer";',
+              '"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "";')
+          text = re.sub(r'DEVELOPMENT_TEAM = [^;]+;', 'DEVELOPMENT_TEAM = "";', text)
+          text = re.sub(r'PRODUCT_BUNDLE_IDENTIFIER = org\.mewx\.wenku8Flutter;',
+                        'PRODUCT_BUNDLE_IDENTIFIER = %s;' % os.environ['BUNDLE_ID'], text)
+          pbx_path.write_text(text)
+
+          podfile_path = pathlib.Path('ios/Podfile')
+          podfile = podfile_path.read_text()
+          podfile = re.sub(r"^#\s*platform :ios, '[\d.]+'",
+                           "platform :ios, '%s'" % os.environ['DEPLOYMENT_TARGET'],
+                           podfile, flags=re.M)
+          podfile_path.write_text(podfile)
+          print('bundle id:', os.environ['BUNDLE_ID'], '| ios target:', os.environ['DEPLOYMENT_TARGET'])
+          PY
+
+      - name: Build unsigned Runner.app
+        run: flutter build ios --release --no-codesign
+
+      - name: Package unsigned IPA
+        env:
+          VERSION: ${{ steps.version.outputs.full }}
+        run: |
+          set -euo pipefail
+          mkdir -p build/ios-ipa/Payload
+          cp -R build/ios/iphoneos/Runner.app build/ios-ipa/Payload/
+          (cd build/ios-ipa && zip -qry "$GITHUB_WORKSPACE/build/wenku8-$VERSION-ios-unsigned.ipa" Payload)
+          ls -lh build/*.ipa
+          unzip -l "build/wenku8-$VERSION-ios-unsigned.ipa" | head -20
+
+      - name: Write self-signing notes
+        env:
+          VERSION: ${{ steps.version.outputs.full }}
+          BUNDLE_ID: ${{ inputs.bundle_id || 'org.mewx.wenku8Flutter' }}
+          DEPLOYMENT_TARGET: ${{ inputs.deployment_target || '13.0' }}
+        run: |
+          cat > build/自签名安装说明.md <<'MD'
+          # Wenku8 Flutter iOS ${VERSION} · 未签名 IPA
+
+          - 文件：`wenku8-${VERSION}-ios-unsigned.ipa`
+          - Bundle ID：`${BUNDLE_ID}`
+          - 最低系统：iOS ${DEPLOYMENT_TARGET}
+          - 架构：arm64（真机，模拟器无法安装）
+
+          这个 IPA **没有经过任何签名**，不能直接安装。请用你自己的 Apple ID / 证书完成自签：
+
+          1. **Sideloadly**（Windows / macOS）：选 IPA → 填入你的 Apple ID → 选设备 → Start。免费账号签名有效期 7 天，到期重签。
+          2. **AltStore / SideStore**：手机端导入 IPA 后用 Apple ID 签名。
+          3. **TrollStore**（仅 iOS 14.0–17.0 支持 TrollStore 2 的机型）：直接安装未签名 IPA，永不过期。
+          4. **e-sign / 轻松签 / 爱思助手**：导入 IPA 后用自己的证书签名。
+
+          提示：
+          - 免费 Apple ID 签名需要 App ID 唯一，若提示冲突可在 Actions 运行时改 `bundle_id` 重编。
+          - 7 天到期后重新签名即可，数据会保留（Bundle ID 不变的前提下）。
+          - 自签属于个人用途，请勿分发给他人。
+          MD
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wenku8-${{ steps.version.outputs.full }}-ios-unsigned
+          path: |
+            build/wenku8-*.ipa
+            build/自签名安装说明.md
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish release asset
+        if: ${{ github.ref_type == 'tag' || inputs.publish_release }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.full }}
+          RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || format('ios-v{0}', steps.version.outputs.full) }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.ref_type }}" != "tag" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -f "$RELEASE_TAG"
+            git push -f origin "$RELEASE_TAG"
+          fi
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" build/wenku8-*.ipa build/自签名安装说明.md --clobber
+          else
+            gh release create "$RELEASE_TAG" build/wenku8-*.ipa build/自签名安装说明.md \
+              --title "Wenku8 iOS 未签名 IPA $VERSION" \
+              --notes "Release 构建的未签名 IPA，需自行签名后安装。详见同目录《自签名安装说明.md》。"
+          fi
