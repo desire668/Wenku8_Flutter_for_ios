@@ -1,8 +1,10 @@
 import 'dart:convert';
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'catalog.dart';
@@ -206,6 +208,11 @@ class LibraryState extends ChangeNotifier {
 
     _fontSize = preference('readerFontSize', 19, 15, 27);
     _lineHeight = preference('readerLineHeight', 1.72, 1.3, 2.2);
+    _verticalMargin = preference('readerVerticalMargin', 12, 0, 64);
+    _pageMode = switch (_prefs.get('readerPageMode')) {
+      'horizontal' => 'horizontal',
+      _ => 'scroll',
+    };
     _reduceMotion = _prefs.get('reduceMotion') == true;
     _appTypeface = AppTypeface.fromRecord(_prefs.get('appTypeface'));
     _performance = PerformancePreferences.fromRecords({
@@ -273,6 +280,8 @@ class LibraryState extends ChangeNotifier {
   ThemeMode _theme = ThemeMode.system;
   double _fontSize = 19;
   double _lineHeight = 1.72;
+  double _verticalMargin = 12;
+  String _pageMode = 'scroll';
   bool _reduceMotion = false;
   AppTypeface _appTypeface = AppTypeface.system;
   PerformancePreferences _performance = const PerformancePreferences();
@@ -281,10 +290,60 @@ class LibraryState extends ChangeNotifier {
   bool _disposed = false;
   bool _historyNotificationQueued = false;
 
+  /// Durable mirror of every library record in the app's documents directory.
+  /// NSUserDefaults (SharedPreferences on iOS) is not always flushed before a
+  /// self-signed app is killed, so the shelf can re-open empty. The file is a
+  /// real fsynced write and is used to repopulate preferences on the next load.
+  static const _mirrorName = 'wenku8-library-state.json';
+  Timer? _mirrorDebounce;
+
   static Future<LibraryState> load() async {
     final prefs = await SharedPreferences.getInstance();
     await recoverLibraryRestore(prefs);
+    await _restoreFromMirrorIfEmpty(prefs);
     return LibraryState(prefs);
+  }
+
+  static bool _shelfPopulated(SharedPreferences prefs) {
+    final list = prefs.getStringList('shelf') ?? const <String>[];
+    return list.any((value) => int.tryParse(value) is int && int.parse(value) > 0);
+  }
+
+  static Future<void> _restoreFromMirrorIfEmpty(SharedPreferences prefs) async {
+    if (_shelfPopulated(prefs)) return;
+    File? file;
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      file = File('${dir.path}/$_mirrorName');
+      final raw = await file.readAsString();
+      final map = jsonDecode(raw);
+      if (map is! Map) return;
+      final shelf = map['shelf'];
+      if (shelf is! List || shelf.isEmpty) return;
+      await writeLibraryPreference(prefs, restoreJournalKey, jsonEncode(map));
+      await recoverLibraryRestore(prefs);
+    } on FileSystemException {
+      // No mirror yet on a fresh install.
+    } catch (_) {
+      // A corrupt mirror never clears preferences or blocks startup.
+    }
+  }
+
+  void _scheduleMirror() {
+    _mirrorDebounce?.cancel();
+    _mirrorDebounce = Timer(const Duration(seconds: 2), _writeMirror);
+  }
+
+  Future<void> _writeMirror() async {
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      final file = File('${dir.path}/$_mirrorName');
+      final snapshot = jsonEncode(_backupRecords());
+      if (utf8.encode(snapshot).length > LibraryBackup.maxBytes * 2) return;
+      await file.writeAsString(snapshot, flush: true);
+    } catch (_) {
+      // A failed mirror write must not break reading or collecting.
+    }
   }
 
   Set<int> get shelf => Set.unmodifiable(_shelf);
@@ -305,6 +364,10 @@ class LibraryState extends ChangeNotifier {
   ThemeMode get theme => _theme;
   double get fontSize => _fontSize;
   double get lineHeight => _lineHeight;
+  double get verticalMargin => _verticalMargin;
+  /// 'scroll' (vertical article) or 'horizontal' (left/right swipe paging).
+  String get pageMode => _pageMode;
+  bool get horizontalPaging => _pageMode == 'horizontal';
   int get debugMetadataEncodeCount => _metadataEncodes;
   bool get reduceMotion => _reduceMotion;
   AppTypeface get appTypeface => _appTypeface;
@@ -430,6 +493,37 @@ class LibraryState extends ChangeNotifier {
     });
   }
 
+  Future<void> setVerticalMargin(double value) async {
+    if (_restoreBarrier case final barrier?) {
+      return barrier.future.then((_) => setVerticalMargin(value));
+    }
+    final clamped = value.clamp(0.0, 64.0);
+    await _queuePositionWrite(() async {
+      await writeLibraryPreference(_prefs, 'readerVerticalMargin', clamped);
+      if (_verticalMargin != clamped) {
+        _verticalMargin = clamped;
+        if (!_disposed) _readerSettings.notifyListeners();
+      }
+    });
+  }
+
+  Future<void> setPageMode(String mode) async {
+    if (_restoreBarrier case final barrier?) {
+      return barrier.future.then((_) => setPageMode(mode));
+    }
+    final next = mode == 'horizontal' ? 'horizontal' : 'scroll';
+    await _queuePositionWrite(() async {
+      await writeLibraryPreference(_prefs, 'readerPageMode', next);
+      if (_pageMode != next) {
+        _pageMode = next;
+        if (!_disposed) {
+          _readerSettings.notifyListeners();
+          _readerBehaviorChanges.notifyListeners();
+        }
+      }
+    });
+  }
+
   List<int> get readingHistoryIds {
     final ids =
         {
@@ -464,6 +558,7 @@ class LibraryState extends ChangeNotifier {
         await recoverLibraryRestore(_prefs);
       }
       await write();
+      if (!_disposed) _scheduleMirror();
     });
     return _positionWrites;
   }
@@ -989,6 +1084,8 @@ class LibraryState extends ChangeNotifier {
     'theme': _theme.name,
     'readerFontSize': _fontSize,
     'readerLineHeight': _lineHeight,
+    'readerVerticalMargin': _verticalMargin,
+    'readerPageMode': _pageMode,
     'reduceMotion': _reduceMotion,
     'appTypeface': _appTypeface.name,
     ..._performance.toRecords(),
@@ -1184,6 +1281,12 @@ class LibraryState extends ChangeNotifier {
           if (records['readerLineHeight'] case final num value) {
             _lineHeight = value.toDouble();
           }
+          if (records['readerVerticalMargin'] case final num value) {
+            _verticalMargin = value.toDouble().clamp(0.0, 64.0);
+          }
+          if (records['readerPageMode'] case final String value) {
+            _pageMode = value == 'horizontal' ? 'horizontal' : 'scroll';
+          }
           if (records['glassBlur'] case final num value) {
             _glassBlur = value.toDouble();
           }
@@ -1253,6 +1356,7 @@ class LibraryState extends ChangeNotifier {
         await writeLibraryPreference(_prefs, entry.key, entry.value);
       }
       await writeLibraryPreference(_prefs, restoreJournalKey, null);
+      if (!_disposed) _scheduleMirror();
     } catch (_) {
       if (_prefs.get(restoreJournalKey) != null) {
         await recoverLibraryRestore(_prefs);
@@ -1264,6 +1368,7 @@ class LibraryState extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    _mirrorDebounce?.cancel();
     _appearance.dispose();
     _application.dispose();
     _glassChanges.dispose();

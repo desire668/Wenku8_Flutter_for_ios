@@ -238,6 +238,42 @@ class _ReaderToolsState extends State<ReaderTools> {
             ),
             const ValueKey('reader-line-height-slider'),
           ),
+          const SizedBox(height: 8),
+          _adjustment(
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Row(
+                  children: [
+                    const Expanded(child: Text('翻页动画')),
+                    CupertinoSlidingSegmentedControl<String>(
+                      groupValue: widget.state.pageMode,
+                      children: const {
+                        'scroll': Text('上下滚动'),
+                        'horizontal': Text('左右滑动'),
+                      },
+                      onValueChanged: (value) {
+                        if (value != null) widget.state.setPageMode(value);
+                      },
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                ReaderValueSlider(
+                  sliderKey: const ValueKey('reader-margin-slider'),
+                  label: '上下边距',
+                  value: widget.state.verticalMargin,
+                  min: 0,
+                  max: 64,
+                  divisions: 16,
+                  format: (value) => '${value.round()} pt',
+                  onCommitted: (value) => widget.state.setVerticalMargin(value),
+                ),
+              ],
+            ),
+            const ValueKey('reader-margin-slider'),
+          ),
           _adjustment(
             Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,

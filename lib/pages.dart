@@ -3786,7 +3786,16 @@ class _ReaderPageState extends State<ReaderPage>
                 ),
               ),
             ),
-            const Positioned.fill(child: ReaderEdgeBlur()),
+            // In horizontal page-turn mode the article edges meet the screen,
+            // so the top/bottom fade no longer reads as a continuous column.
+            Positioned.fill(
+              child: AnimatedBuilder(
+                animation: widget.state.readerSettingsChanges,
+                builder: (context, _) => widget.state.horizontalPaging
+                    ? const SizedBox.shrink()
+                    : const ReaderEdgeBlur(),
+              ),
+            ),
             Positioned(
               top: 0,
               left: 0,
@@ -3960,7 +3969,8 @@ class _ReaderPageState extends State<ReaderPage>
                       26,
                       MediaQuery.paddingOf(context).top +
                           FrostedHeader.toolbarHeight +
-                          24,
+                          24 +
+                          widget.state.verticalMargin,
                       26,
                       28,
                     ),
@@ -4087,8 +4097,10 @@ class _ReaderPageState extends State<ReaderPage>
                     ),
                     SliverPadding(
                       padding: EdgeInsets.only(
-                        top: 48,
-                        bottom: MediaQuery.paddingOf(context).bottom + 116,
+                        top: 48 + widget.state.verticalMargin,
+                        bottom: MediaQuery.paddingOf(context).bottom +
+                            116 +
+                            widget.state.verticalMargin,
                       ),
                       sliver: SliverToBoxAdapter(
                         child: Column(
