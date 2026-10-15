@@ -107,7 +107,7 @@ jobs:
           BUNDLE_ID: ${{ inputs.bundle_id || 'org.mewx.wenku8Flutter' }}
           DEPLOYMENT_TARGET: ${{ inputs.deployment_target || '13.0' }}
         run: |
-          cat > build/自签名安装说明.md <<'MD'
+          cat > build/自签名安装说明.md <<MD
           # Wenku8 Flutter iOS ${VERSION} · 未签名 IPA
 
           - 文件：`wenku8-${VERSION}-ios-unsigned.ipa`
