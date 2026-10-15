@@ -2771,6 +2771,12 @@ class _ReaderPageState extends State<ReaderPage>
   int _chapterRevealFirst = 0;
   late final AnimationController _chrome;
   bool _chromeTarget = true;
+  // Horizontal slide page-turn animation controller.
+  // Value 0 = centred; negative = slid left (forward); positive = slid right
+  // (backward).  During a drag the value tracks the finger directly; on
+  // release it is animated to ±1 (complete) or back to 0 (rebound).
+  late final AnimationController _pageSlide;
+  double _slideScreenW = 0;
 
   @override
   void initState() {
@@ -2785,6 +2791,11 @@ class _ReaderPageState extends State<ReaderPage>
       duration: NovelMotion.contact,
       reverseDuration: NovelMotion.exit,
       value: 1,
+    );
+    _pageSlide = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 280),
+      value: 0,
     );
     WidgetsBinding.instance.addObserver(this);
     final saved = widget.state.positionFor(widget.novel.id);
@@ -2824,6 +2835,7 @@ class _ReaderPageState extends State<ReaderPage>
     _scroll.dispose();
     _chapterReveal.dispose();
     _chrome.dispose();
+    _pageSlide.dispose();
     super.dispose();
   }
 
@@ -3233,20 +3245,34 @@ class _ReaderPageState extends State<ReaderPage>
 
   /// Translate a horizontal swipe into a viewport page turn, and at chapter
   /// boundaries into the previous/next chapter so the article keeps flowing.
-  void _onHorizontalDragStart(DragStartDetails _) => _swipeDx = 0;
+  /// During the drag the article follows the finger via [_pageSlide]; on
+  /// release it either completes the slide (and jumps the scroll underneath)
+  /// or rebounds to centre.
+  void _onHorizontalDragStart(DragStartDetails _) {
+    _swipeDx = 0;
+    _pageSlide.stop();
+    _pageSlide.value = 0;
+  }
 
   void _onHorizontalDragUpdate(DragUpdateDetails details) {
     _swipeDx += details.primaryDelta ?? 0;
+    if (_slideScreenW > 0) {
+      _pageSlide.value = (_swipeDx / _slideScreenW).clamp(-1.0, 1.0);
+    }
   }
 
   void _onHorizontalDragEnd(DragEndDetails details) {
     final velocity = details.primaryVelocity ?? 0;
     int direction;
+    bool proceed;
     if (velocity.abs() >= 40) {
       direction = velocity < 0 ? 1 : -1;
+      proceed = true;
     } else if (_swipeDx.abs() >= 40) {
       direction = _swipeDx < 0 ? 1 : -1;
+      proceed = _swipeDx.abs() >= _slideScreenW * 0.2;
     } else {
+      _pageSlide.animateTo(0);
       return;
     }
     if (!_ready ||
@@ -3255,19 +3281,82 @@ class _ReaderPageState extends State<ReaderPage>
         _listeningOpen ||
         _findOpen ||
         !_scroll.hasClients) {
+      _pageSlide.animateTo(0);
       return;
     }
     final position = _scroll.position;
     if (direction > 0 &&
         (position.maxScrollExtent - position.pixels).abs() <= 1.0) {
-      if (_chapter + 1 < widget.novel.chapters.length) _go(_chapter + 1);
+      if (_chapter + 1 < widget.novel.chapters.length) {
+        _pageSlide
+            .animateTo(0)
+            .then((_) => _go(_chapter + 1))
+            .catchError((_) {});
+      } else {
+        _pageSlide.animateTo(0);
+      }
       return;
     }
     if (direction < 0 && position.pixels.abs() <= 1.0) {
-      if (_chapter > 0) _go(_chapter - 1);
+      if (_chapter > 0) {
+        _pageSlide
+            .animateTo(0)
+            .then((_) => _go(_chapter - 1))
+            .catchError((_) {});
+      } else {
+        _pageSlide.animateTo(0);
+      }
       return;
     }
-    _pageBy(direction);
+    if (proceed) {
+      _performSlidePageTurn(direction);
+    } else {
+      _pageSlide.animateTo(0);
+    }
+  }
+
+  /// Slide the article off-screen, jump the scroll to the next/previous page
+  /// underneath the translated (now invisible) content, then snap the
+  /// translate back to zero.  This produces a right-to-left (or left-to-right)
+  /// page-turn without a visible scroll jump.
+  void _performSlidePageTurn(int direction) {
+    if (!_scroll.hasClients) return;
+    _suspendListeningFollow();
+    final position = _scroll.position;
+    final target =
+        (position.pixels +
+                direction *
+                    (position.viewportDimension - _readingInset - 100).clamp(
+                      80.0,
+                      double.infinity,
+                    ))
+            .clamp(0.0, position.maxScrollExtent);
+    if (widget.state.reduceMotion || MediaQuery.disableAnimationsOf(context)) {
+      _scroll.jumpTo(target);
+      _pageSlide.value = 0;
+      return;
+    }
+    _pageSlide
+        .animateTo(
+          direction > 0 ? -1.0 : 1.0,
+          duration: const Duration(milliseconds: 280),
+          curve: NovelMotion.ease,
+        )
+        .then((_) {
+          // The animation completed naturally; jump the scroll underneath the
+          // (now off-screen) translated content and snap back to centre.
+          if (!_scroll.hasClients) {
+            _pageSlide.value = 0;
+            return;
+          }
+          _scroll.jumpTo(target);
+          _pageSlide.value = 0;
+        })
+        .catchError((_) {
+          // Animation was canceled (e.g. user started a new drag mid-slide).
+          // Just reset the translate; the scroll position is unchanged.
+          _pageSlide.value = 0;
+        });
   }
 
   Future<String> _requestContent(int index, {bool refresh = false}) async {
@@ -3720,6 +3809,7 @@ class _ReaderPageState extends State<ReaderPage>
         ? const NovelChapter('目录为空', '')
         : widget.novel.chapters[_chapter];
     _layoutWidth = MediaQuery.sizeOf(context).width;
+    _slideScreenW = _layoutWidth;
     _layoutTypeface = widget.state.appTypeface;
     final dark = Theme.of(context).brightness == Brightness.dark;
     return Scaffold(
@@ -3740,44 +3830,55 @@ class _ReaderPageState extends State<ReaderPage>
                   key: const ValueKey('reader-article-boundary'),
                   child: ColoredBox(
                     color: Theme.of(context).colorScheme.surface,
-                    child: CallbackShortcuts(
-                      bindings: {
-                        const SingleActivator(
-                          LogicalKeyboardKey.pageDown,
-                        ): () =>
-                            _pageBy(1),
-                        const SingleActivator(LogicalKeyboardKey.space): () =>
-                            _pageBy(1),
-                        const SingleActivator(LogicalKeyboardKey.pageUp): () =>
-                            _pageBy(-1),
-                        const SingleActivator(LogicalKeyboardKey.home): () =>
-                            _seekProgress(0),
-                        const SingleActivator(LogicalKeyboardKey.end): () =>
-                            _seekProgress(1),
-                        const SingleActivator(
-                          LogicalKeyboardKey.keyF,
-                          control: true,
-                        ): _findInChapter,
-                        const SingleActivator(
-                          LogicalKeyboardKey.keyF,
-                          meta: true,
-                        ): _findInChapter,
-                      },
-                      child: Focus(
-                        autofocus: true,
-                        child: Semantics(
-                          customSemanticsActions: {
-                            const CustomSemanticsAction(label: '切换阅读控件'):
-                                _toggleChrome,
-                          },
-                          child: GestureDetector(
-                            key: const ValueKey('reader-content-tap'),
-                            behavior: HitTestBehavior.translucent,
-                            onTap: _toggleChrome,
-                            onHorizontalDragStart: _onHorizontalDragStart,
-                            onHorizontalDragUpdate: _onHorizontalDragUpdate,
-                            onHorizontalDragEnd: _onHorizontalDragEnd,
-                            child: _article(context, chapter, dark),
+                    child: AnimatedBuilder(
+                      animation: _pageSlide,
+                      builder: (context, child) => Transform.translate(
+                        offset: Offset(_pageSlide.value * _slideScreenW, 0),
+                        child: child,
+                      ),
+                      child: CallbackShortcuts(
+                        bindings: {
+                          const SingleActivator(
+                            LogicalKeyboardKey.pageDown,
+                          ): () => _pageBy(1),
+                          const SingleActivator(
+                            LogicalKeyboardKey.space,
+                          ): () => _pageBy(1),
+                          const SingleActivator(
+                            LogicalKeyboardKey.pageUp,
+                          ): () => _pageBy(-1),
+                          const SingleActivator(
+                            LogicalKeyboardKey.home,
+                          ): () => _seekProgress(0),
+                          const SingleActivator(
+                            LogicalKeyboardKey.end,
+                          ): () => _seekProgress(1),
+                          const SingleActivator(
+                            LogicalKeyboardKey.keyF,
+                            control: true,
+                          ): _findInChapter,
+                          const SingleActivator(
+                            LogicalKeyboardKey.keyF,
+                            meta: true,
+                          ): _findInChapter,
+                        },
+                        child: Focus(
+                          autofocus: true,
+                          child: Semantics(
+                            customSemanticsActions: {
+                              const CustomSemanticsAction(
+                                label: '切换阅读控件',
+                              ): _toggleChrome,
+                            },
+                            child: GestureDetector(
+                              key: const ValueKey('reader-content-tap'),
+                              behavior: HitTestBehavior.translucent,
+                              onTap: _toggleChrome,
+                              onHorizontalDragStart: _onHorizontalDragStart,
+                              onHorizontalDragUpdate: _onHorizontalDragUpdate,
+                              onHorizontalDragEnd: _onHorizontalDragEnd,
+                              child: _article(context, chapter, dark),
+                            ),
                           ),
                         ),
                       ),
@@ -3916,7 +4017,8 @@ class _ReaderPageState extends State<ReaderPage>
             _readingInset =
                 MediaQuery.paddingOf(context).top +
                 FrostedHeader.toolbarHeight +
-                12;
+                12 +
+                widget.state.verticalMargin;
             final content = snapshot.data?.content;
             final ready =
                 snapshot.connectionState == ConnectionState.done &&
@@ -4034,7 +4136,10 @@ class _ReaderPageState extends State<ReaderPage>
                     )
                   else ...[
                     SliverPadding(
-                      padding: const EdgeInsets.symmetric(horizontal: 26),
+                      padding: EdgeInsets.symmetric(
+                        horizontal: 26,
+                        vertical: widget.state.verticalMargin,
+                      ),
                       sliver: SliverList.builder(
                         addAutomaticKeepAlives: false,
                         itemCount: paragraphs.length,
