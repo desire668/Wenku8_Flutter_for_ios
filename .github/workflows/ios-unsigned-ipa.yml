@@ -15,7 +15,7 @@ on:
       deployment_target:
         description: 'Minimum iOS version'
         required: false
-        default: '13.0'
+        default: '15.0'
       publish_release:
         description: 'Attach the IPA to a GitHub release'
         type: boolean
@@ -32,13 +32,13 @@ concurrency:
 
 jobs:
   build:
-    runs-on: macos-15
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
 
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.41.5'
+          flutter-version: '3.47.7'
           channel: stable
           cache: true
 
@@ -76,6 +76,8 @@ jobs:
           text = re.sub(r'DEVELOPMENT_TEAM = [^;]+;', 'DEVELOPMENT_TEAM = "";', text)
           text = re.sub(r'PRODUCT_BUNDLE_IDENTIFIER = org\.mewx\.wenku8Flutter;',
                         'PRODUCT_BUNDLE_IDENTIFIER = %s;' % os.environ['BUNDLE_ID'], text)
+          text = re.sub(r'IPHONEOS_DEPLOYMENT_TARGET = [\d.]+;',
+                        'IPHONEOS_DEPLOYMENT_TARGET = %s;' % os.environ['DEPLOYMENT_TARGET'], text)
           pbx_path.write_text(text)
 
           podfile_path = pathlib.Path('ios/Podfile')

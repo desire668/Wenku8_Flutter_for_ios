@@ -43,16 +43,19 @@ Future<void> main() async {
   };
   SystemChrome.setSystemUIOverlayStyle(novelSystemUiStyle(brightness));
   final remote = LegacyWenkuRepository();
-  final repository = defaultTargetPlatform == TargetPlatform.android
+  final supportedClient =
+      defaultTargetPlatform == TargetPlatform.android ||
+      defaultTargetPlatform == TargetPlatform.iOS;
+  final repository = supportedClient
       ? OfflineNovelRepository(
           remote: remote,
           cache: await OfflineCacheStore.forApp(),
         )
       : const DemoNovelRepository();
-  final features = defaultTargetPlatform == TargetPlatform.android
+  final features = supportedClient
       ? WenkuFeatures(account: WenkuAccount(), publications: remote)
       : null;
-  final listening = defaultTargetPlatform == TargetPlatform.android
+  final listening = supportedClient
       ? ListeningController(
           repository: repository,
           audio: await SpeechAudioCache.forApp(),
@@ -66,7 +69,7 @@ Future<void> main() async {
       repository: repository,
       features: features,
       listening: listening,
-      updates: defaultTargetPlatform == TargetPlatform.android
+      updates: supportedClient
           ? AppUpdates(preferences: await SharedPreferences.getInstance())
           : null,
     ),
