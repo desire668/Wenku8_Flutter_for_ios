@@ -25,6 +25,20 @@ private func rootViewController() -> UIViewController? {
   return scenes.first?.windows.first?.rootViewController
 }
 
+/// Matches Android's instanceFollowRedirects=false: the relay sometimes
+/// answers a login with a 302 whose Set-Cookie must be captured as-is.
+private final class NoRedirectDelegate: NSObject, URLSessionDataDelegate {
+  func urlSession(
+    _ session: URLSession,
+    task: URLSessionTask,
+    willPerformHTTPRedirection response: HTTPURLResponse,
+    newRequest request: URLRequest,
+    completionHandler: @escaping (URLRequest?) -> Void
+  ) {
+    completionHandler(nil)
+  }
+}
+
 // MARK: - legacy_api: Wenku8 relay bridge
 
 /// Mirrors the Android Wenku8Bridge: the same relay protocol, cookie custody and
@@ -35,6 +49,17 @@ final class Wenku8BridgePlugin: NSObject, FlutterPlugin {
     let instance = Wenku8BridgePlugin()
     registrar.addMethodCallDelegate(instance, channel: channel)
   }
+
+  // Android sets instanceFollowRedirects=false on every relay/illustration
+  // connection so login Set-Cookie on a 302 is never swallowed.
+  private static let redirectDelegate = NoRedirectDelegate()
+  private static let session: URLSession = {
+    let config = URLSessionConfiguration.default
+    config.timeoutIntervalForRequest = 15
+    config.timeoutIntervalForResource = 30
+    config.httpShouldSetCookies = false
+    return URLSession(configuration: config, delegate: Wenku8BridgePlugin.redirectDelegate, delegateQueue: nil)
+  }()
 
   private let io = DispatchQueue(label: "wenku8.api.io", attributes: .concurrent)
   private let ioSlots = DispatchSemaphore(value: 4)
@@ -135,6 +160,10 @@ final class Wenku8BridgePlugin: NSObject, FlutterPlugin {
         postToMain { result(response) }
       } catch WenkuFailure.encoding {
         postToMain { result(FlutterError(code: "REVIEW_ENCODING", message: "Characters outside the review encoding", details: nil)) }
+      } catch WenkuFailure.network(let reason) {
+        postToMain { result(FlutterError(code: "LEGACY_API_ERROR", message: reason, details: nil)) }
+      } catch WenkuFailure.badStatus(let code) {
+        postToMain { result(FlutterError(code: "LEGACY_API_ERROR", message: "服务器返回 \(code)", details: nil)) }
       } catch {
         // Never expose actions, credentials or cookie-bearing errors.
         postToMain { result(WenkuError.legacy) }
@@ -154,7 +183,9 @@ final class Wenku8BridgePlugin: NSObject, FlutterPlugin {
   }
 
   private enum WenkuFailure: Error {
-    case input, session, encoding, network
+    case input, session, encoding
+    case network(String)
+    case badStatus(Int)
   }
 
   /// appver matches the Android v1.30 runtime: HMAC-SHA256 over
@@ -180,25 +211,32 @@ final class Wenku8BridgePlugin: NSObject, FlutterPlugin {
     if let cookie {
       request.setValue("PHPSESSID=\(cookie)", forHTTPHeaderField: "Cookie")
     }
-    request.timeoutInterval = 10
+    request.timeoutInterval = 15
     request.httpShouldHandleCookies = false
     request.httpBody = Data(body.utf8)
 
     let semaphore = DispatchSemaphore(value: 0)
-    var outcome: Result<(Data, HTTPURLResponse), Error> = .failure(WenkuFailure.network)
-    let task = URLSession.shared.dataTask(with: request) { data, response, error in
-      defer { semaphore.signal() }
-      if let error { outcome = .failure(error); return }
-      guard let http = response as? HTTPURLResponse, let data else { return }
-      outcome = .success((data, http))
+    var payload: Data?
+    var http: HTTPURLResponse?
+    var urlError: Error?
+    let task = Wenku8BridgePlugin.session.dataTask(with: request) { data, response, error in
+      payload = data
+      http = response as? HTTPURLResponse
+      urlError = error
+      semaphore.signal()
     }
     task.resume()
-    if semaphore.wait(timeout: .now() + 15) == .timedOut {
+    if semaphore.wait(timeout: .now() + 30) == .timedOut {
       task.cancel()
-      throw WenkuFailure.network
+      throw WenkuFailure.network("请求超时，请检查网络后重试")
     }
-    let (data, http) = try outcome.get()
-    guard (200..<300).contains(http.statusCode), data.count <= 8 * 1024 * 1024 else { throw WenkuFailure.network }
+    if let error = urlError as? URLError {
+      throw WenkuFailure.network("网络连接失败（\(error.errorCode)）")
+    }
+    guard let http = http, (200..<300).contains(http.statusCode),
+          let data = payload, data.count <= 8 * 1024 * 1024 else {
+      throw WenkuFailure.badStatus(http?.statusCode ?? 0)
+    }
     let rotated = http.allHeaderFields
       .filter { ($0.key as? String)?.caseInsensitiveCompare("Set-Cookie") == .orderedSame }
       .compactMap { $0.value as? String }
@@ -258,20 +296,27 @@ final class Wenku8BridgePlugin: NSObject, FlutterPlugin {
     request.timeoutInterval = 12
     request.httpShouldHandleCookies = false
     let semaphore = DispatchSemaphore(value: 0)
-    var outcome: Result<Data, Error> = .failure(WenkuFailure.network)
-    let task = URLSession.shared.dataTask(with: request) { data, response, error in
-      defer { semaphore.signal() }
-      if let error { outcome = .failure(error); return }
-      guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
-            let data, data.count <= 8 * 1024 * 1024 else { return }
-      outcome = .success(data)
+    var payload: Data?
+    var http: HTTPURLResponse?
+    var urlError: Error?
+    let task = Wenku8BridgePlugin.session.dataTask(with: request) { data, response, error in
+      payload = data
+      http = response as? HTTPURLResponse
+      urlError = error
+      semaphore.signal()
     }
     task.resume()
     if semaphore.wait(timeout: .now() + 20) == .timedOut {
       task.cancel()
-      throw WenkuFailure.network
+      throw WenkuFailure.network("插图请求超时")
     }
-    let bytes = try outcome.get()
+    if let error = urlError as? URLError {
+      throw WenkuFailure.network("插图加载失败（\(error.errorCode)）")
+    }
+    guard let http = http, (200..<300).contains(http.statusCode),
+          let bytes = payload, bytes.count <= 8 * 1024 * 1024 else {
+      throw WenkuFailure.badStatus(http?.statusCode ?? 0)
+    }
     guard validImage(bytes) else { throw WenkuFailure.input }
     // An online illustration survives a cache write error.
     if let _ = try? manager.createDirectory(at: images, withIntermediateDirectories: true) {

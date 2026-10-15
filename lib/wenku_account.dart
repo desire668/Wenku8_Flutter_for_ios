@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:xml/xml.dart';
 
 import 'legacy_transport.dart';
@@ -152,6 +153,10 @@ class WenkuAccount extends ChangeNotifier {
       ? error.message
       : error is FormatException
       ? error.message.toString()
+      : error is PlatformException && error.code == 'LEGACY_API_ERROR'
+      ? (error.message?.isNotEmpty == true
+          ? error.message!
+          : '网络或本地存储暂时异常，请重试')
       : '网络或本地存储暂时异常，请重试';
 
   Future<void> initialize() => _initialization ??= _run('正在读取账号', () async {
